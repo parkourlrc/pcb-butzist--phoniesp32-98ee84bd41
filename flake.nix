@@ -52,6 +52,12 @@
           pkgs.llvm
           pkgs.dioxus-cli
         ];
+
+        agentPackages =
+          [
+            pkgs.python3
+          ]
+          ++ packages;
       in {
         devShells.default = pkgs.mkShell {
           name = "dev-shell-dioxus-esp-nightly";
@@ -60,7 +66,7 @@
             ++ [
               (jlib.makeJailedOpencode {
                 name = "opencode";
-                extraPkgs = packages;
+                extraPkgs = agentPackages;
                 extraReadwriteDirs = ["~/.cargo"];
                 baseJailOptions = with combinators;
                   jlib.commonJailOptions

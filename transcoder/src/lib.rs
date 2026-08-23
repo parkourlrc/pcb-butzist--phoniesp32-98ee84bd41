@@ -26,7 +26,7 @@ pub fn compute_filename(content: &[u8]) -> String {
     )
 }
 
-use audio_file_utils::metadata::Metadata;
+use audio_file_utils::metadata::{Metadata, MetadataString};
 use symphonia::core::formats::FormatOptions;
 use symphonia::core::io::MediaSourceStream;
 use symphonia::core::meta::{MetadataOptions, StandardTagKey};
@@ -38,8 +38,7 @@ const OUT_RATE: u32 = 44100;
 pub fn extract_metadata(input: &[u8]) -> Metadata {
     let cursor = std::io::Cursor::new(input.to_vec());
     let mss = MediaSourceStream::new(Box::new(cursor), Default::default());
-    let mut hint = Hint::new();
-    hint.with_extension("mp3");
+    let hint = Hint::new();
     let meta_opts: MetadataOptions = Default::default();
     let fmt_opts: FormatOptions = Default::default();
     let mut probed = match default::get_probe().format(&hint, mss, &fmt_opts, &meta_opts) {
@@ -51,37 +50,98 @@ pub fn extract_metadata(input: &[u8]) -> Metadata {
     let mut title = None;
     let mut album = None;
 
-    if let Some(meta) = probed.metadata.get()
-        && let Some(metadata) = meta.current()
-    {
-        for tag in metadata.tags() {
-            match tag.std_key {
-                Some(StandardTagKey::Artist) => artist = Some(tag.value.to_string()),
-                Some(StandardTagKey::TrackTitle) => title = Some(tag.value.to_string()),
-                Some(StandardTagKey::Album) => album = Some(tag.value.to_string()),
-                _ => {}
-            }
-        }
-    }
+    extract_metadata_from_container(&mut probed, &mut artist, &mut title, &mut album);
+    extract_metadata_outside_container(probed, &mut artist, &mut title, &mut album);
+
+    // RIFF INFO values may include their NUL terminator.
+    let strip_nul = |s: Option<String>| -> Option<String> {
+        s.map(|s| s.trim_end_matches('\0').to_string())
+    };
+    let artist = strip_nul(artist);
+    let title = strip_nul(title);
+    let album = strip_nul(album);
 
     let artist_str = artist.unwrap_or("Unknown".to_string());
     let title_str = title.unwrap_or("Unknown".to_string());
     let album_str = album.unwrap_or("Unknown".to_string());
 
     Metadata {
-        artist: artist_str
-            .as_str()
-            .try_into()
-            .unwrap_or("Unknown".try_into().unwrap()),
-        title: title_str
-            .as_str()
-            .try_into()
-            .unwrap_or("Unknown".try_into().unwrap()),
-        album: album_str
-            .as_str()
-            .try_into()
-            .unwrap_or("Unknown".try_into().unwrap()),
+        artist: clamp_to_metadata_string(&artist_str),
+        title: clamp_to_metadata_string(&title_str),
+        album: clamp_to_metadata_string(&album_str),
     }
+}
+
+/// Tags found by the probe outside the container (e.g., ID3v2 preceding an MP3 stream),
+/// used to fill any fields the container did not provide.
+fn extract_metadata_outside_container(
+    mut probed: symphonia::core::probe::ProbeResult,
+    artist: &mut Option<String>,
+    title: &mut Option<String>,
+    album: &mut Option<String>,
+) {
+    if let Some(meta) = probed.metadata.get()
+        && let Some(metadata) = meta.current()
+    {
+        for tag in metadata.tags() {
+            match tag.std_key {
+                Some(StandardTagKey::Artist) => {
+                    artist.get_or_insert(tag.value.to_string());
+                }
+                Some(StandardTagKey::TrackTitle) => {
+                    title.get_or_insert(tag.value.to_string());
+                }
+                Some(StandardTagKey::Album) => {
+                    album.get_or_insert(tag.value.to_string());
+                }
+                _ => {}
+            }
+        }
+    }
+}
+
+/// Tags embedded in the container itself (e.g., Vorbis comments in OGG, LIST INFO in WAV).
+fn extract_metadata_from_container(
+    probed: &mut symphonia::core::probe::ProbeResult,
+    artist: &mut Option<String>,
+    title: &mut Option<String>,
+    album: &mut Option<String>,
+) {
+    let mut meta_log = probed.format.metadata();
+    if let Some(metadata) = meta_log.skip_to_latest() {
+        for tag in metadata.tags() {
+            match tag.std_key {
+                Some(StandardTagKey::Artist) => {
+                    artist.get_or_insert(tag.value.to_string());
+                }
+                Some(StandardTagKey::TrackTitle) => {
+                    title.get_or_insert(tag.value.to_string());
+                }
+                Some(StandardTagKey::Album) => {
+                    album.get_or_insert(tag.value.to_string());
+                }
+                _ => {}
+            }
+        }
+    }
+}
+
+/// Truncate a string to the metadata field capacity (31 bytes), on a UTF-8 char boundary.
+fn clamp_to_metadata_string(s: &str) -> MetadataString {
+    if s.len() <= 31 {
+        return s
+            .try_into()
+            .unwrap_or_else(|_| "Unknown".try_into().unwrap());
+    }
+
+    let mut end = 31;
+    while !s.is_char_boundary(end) {
+        end -= 1;
+    }
+
+    s[..end]
+        .try_into()
+        .unwrap_or_else(|_| "Unknown".try_into().unwrap())
 }
 
 pub async fn decode_and_normalize(

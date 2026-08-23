@@ -4,11 +4,13 @@ use embedded_io_async::{ErrorType, Read, ReadExactError, Write};
 use heapless::{String, Vec};
 use thiserror::Error;
 
+pub type MetadataString = String<31>;
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct Metadata {
-    pub artist: String<31>,
-    pub title: String<31>,
-    pub album: String<31>,
+    pub artist: MetadataString,
+    pub title: MetadataString,
+    pub album: MetadataString,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -101,7 +103,12 @@ where
                         let remaining_sub = sub_size - text_size;
                         skip(&mut reader, remaining_sub).await?;
                     }
-                    remaining -= 8 + sub_size;
+                    let consumed = 8 + sub_size + (sub_size & 0x1);
+                    // Skip the word-alignment pad byte after odd-sized chunk data.
+                    if sub_size & 0x1 == 1 {
+                        skip(&mut reader, 1).await?;
+                    }
+                    remaining -= consumed;
                 }
             }
 
@@ -140,6 +147,35 @@ where
     Ok(())
 }
 
+/// Write a single INFO subchunk. Per the RIFF spec, chunk data is padded to an
+/// even byte count; the pad byte is not included in the size field.
+async fn write_info_subchunk<W>(
+    writer: &mut W,
+    id: &[u8; 4],
+    data: &[u8],
+) -> Result<usize, Error<<W as ErrorType>::Error>>
+where
+    W: Write,
+{
+    writer.write_all(id).await.map_err(Error::Write)?;
+    let len = data.len().min(31);
+    writer
+        .write_all(&((len + 1) as u32).to_le_bytes())
+        .await
+        .map_err(Error::Write)?;
+    writer.write_all(&data[..len]).await.map_err(Error::Write)?;
+    writer.write_all(&[0]).await.map_err(Error::Write)?;
+
+    // Word-align: emit one pad byte when the data length (including NUL) is odd.
+    let mut written = 8 + len + 1;
+    if (len + 1) & 0x1 == 1 {
+        writer.write_all(&[0]).await.map_err(Error::Write)?;
+        written += 1;
+    }
+
+    Ok(written)
+}
+
 pub async fn write_info_chunk<W>(
     mut writer: W,
     metadata: &Metadata,
@@ -149,50 +185,15 @@ where
 {
     writer.write_all(b"INFO").await.map_err(Error::Write)?;
 
-    // Artist
     let artist_data = metadata.artist.as_bytes();
-    let artist_len = artist_data.len().min(31);
-    writer.write_all(b"IART").await.map_err(Error::Write)?;
-    writer
-        .write_all(&((artist_len + 1) as u32).to_le_bytes())
-        .await
-        .map_err(Error::Write)?;
-    writer
-        .write_all(&artist_data[..artist_len])
-        .await
-        .map_err(Error::Write)?;
-    writer.write_all(&[0]).await.map_err(Error::Write)?;
-
-    // Title
     let title_data = metadata.title.as_bytes();
-    let title_len = title_data.len().min(31);
-    writer.write_all(b"INAM").await.map_err(Error::Write)?;
-    writer
-        .write_all(&((title_len + 1) as u32).to_le_bytes())
-        .await
-        .map_err(Error::Write)?;
-    writer
-        .write_all(&title_data[..title_len])
-        .await
-        .map_err(Error::Write)?;
-    writer.write_all(&[0]).await.map_err(Error::Write)?;
-
-    // Album
     let album_data = metadata.album.as_bytes();
-    let album_len = album_data.len().min(31);
-    writer.write_all(b"IPRD").await.map_err(Error::Write)?;
-    writer
-        .write_all(&((album_len + 1) as u32).to_le_bytes())
-        .await
-        .map_err(Error::Write)?;
-    writer
-        .write_all(&album_data[..album_len])
-        .await
-        .map_err(Error::Write)?;
-    writer.write_all(&[0]).await.map_err(Error::Write)?;
 
     // Pad the LIST data with zeros
-    let written = 4 + (8 + artist_len + 1) + (8 + title_len + 1) + (8 + album_len + 1);
+    let written = 4
+        + write_info_subchunk(&mut writer, b"IART", artist_data).await?
+        + write_info_subchunk(&mut writer, b"INAM", title_data).await?
+        + write_info_subchunk(&mut writer, b"IPRD", album_data).await?;
     let padding = INFO_CHUNK_SIZE - written;
     for _ in 0..padding {
         writer.write_all(&[0]).await.map_err(Error::Write)?;
