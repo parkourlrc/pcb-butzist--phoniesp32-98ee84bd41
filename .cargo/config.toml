@@ -1,0 +1,12 @@
+# Host (development/test) linker. rustc's default linker is a binary named `cc`;
+# this repo pins a more consistent choice. `clang` drives the `lld` linker for
+# fast host linking. This mirrors the global ~/.cargo/config.toml (which uses
+# clang + mold) but uses lld, since `mold` isn't part of the nix dev / agent
+# environments.
+#
+# The target below matches x86_64 Linux hosts (used for `cargo test` in
+# audio-file-utils, transcoder, cli, etc.). The firmware sub-project overrides
+# this with its own target-scoped config under firmware/.cargo/config.toml.
+[target.x86_64-unknown-linux-gnu]
+linker = "clang"
+rustflags = ["-C", "link-arg=-fuse-ld=lld"]

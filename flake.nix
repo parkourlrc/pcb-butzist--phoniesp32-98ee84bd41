@@ -51,6 +51,12 @@
           pkgs.lld
           pkgs.llvm
           pkgs.dioxus-cli
+          # Native C toolchain. rustc uses a `clang` linker driver for host builds
+          # (build-script and test executables), so `cargo test`/`cargo build` on
+          # the host needs a real linker plus its runtime libs. `clang` drives the
+          # `lld` linker (already provided above) for fast, consistent linking. The
+          # repo's .cargo/config.toml pins `linker = "clang"`.
+          pkgs.clang
         ];
 
         agentPackages =
